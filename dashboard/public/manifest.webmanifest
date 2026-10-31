@@ -1,1 +1,16 @@
-
+{
+  "name": "LiveTrack-Pro Unified GPS & Audio Platform",
+  "short_name": "LiveTrack-Pro",
+  "description": "Real-time GPS tracking and explicit consent-based audio platform for Android, iOS, Termux, Windows, and Linux.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0b1120",
+  "theme_color": "#0284c7",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    }
+  ]
+}
