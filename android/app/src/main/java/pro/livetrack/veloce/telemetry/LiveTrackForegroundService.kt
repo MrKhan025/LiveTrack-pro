@@ -1,4 +1,4 @@
-package pro.livetrack.veloce.telemetry
+package pro.livetrack.app.telemetry
 
 import android.annotation.SuppressLint
 import android.app.*
