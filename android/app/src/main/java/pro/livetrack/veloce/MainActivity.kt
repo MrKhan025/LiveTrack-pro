@@ -1,4 +1,4 @@
-package pro.livetrack.veloce
+package pro.livetrack.app
 
 import android.Manifest
 import android.content.Intent
@@ -13,8 +13,8 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.*
 import org.json.JSONObject
-import pro.livetrack.veloce.audio.ConsentAudioStreamer
-import pro.livetrack.veloce.telemetry.LiveTrackForegroundService
+import pro.livetrack.app.audio.ConsentAudioStreamer
+import pro.livetrack.app.telemetry.LiveTrackForegroundService
 import java.net.HttpURLConnection
 import java.net.URL
 
