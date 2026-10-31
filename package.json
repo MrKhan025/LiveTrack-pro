@@ -1,11 +1,20 @@
 {
-  "name": "livetrack-pro-monorepo",
-  "version": "2.0.0",
+  "name": "livetrack-pro",
+  "version": "2.1.0",
   "private": true,
-  "description": "LiveTrack-Pro (Codename: Veloce / Navox) – Unified Cross-Platform GPS & Consent-Based Audio Platform",
+  "description": "LiveTrack-Pro – Unified Real-Time GPS & Consent-Based Audio Platform for Android, iOS, Termux, Windows, Linux & macOS",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/MrKhan025/LiveTrack-pro.git"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "scripts": {
     "start": "node backend/src/server.js",
-    "test": "node --test backend/tests/platform.test.js",
+    "dev": "node --watch backend/src/server.js",
+    "test": "node backend/src/runTests.js",
     "migrate": "node backend/src/db/migrate.js",
     "agent": "node cli-agent/livetrack-agent.js"
   }
