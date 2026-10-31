@@ -1,0 +1,12 @@
+{
+  "name": "livetrack-pro-universal-agent",
+  "version": "2.0.0",
+  "description": "Cross-platform GPS & Consent-Based Audio CLI Agent for Termux (Android), Linux, Windows, macOS, and iOS shells",
+  "main": "livetrack-agent.js",
+  "bin": {
+    "livetrack-agent": "./livetrack-agent.js"
+  },
+  "scripts": {
+    "start": "node livetrack-agent.js"
+  }
+}
