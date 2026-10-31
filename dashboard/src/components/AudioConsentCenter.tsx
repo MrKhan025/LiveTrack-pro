@@ -40,7 +40,7 @@ export const AudioConsentCenter: React.FC<AudioConsentCenterProps> = ({
       const y = (height - barHeight) / 2;
       ctx.fillStyle = liveWaveform.length > 0 ? '#ef4444' : '#38bdf8';
       ctx.beginPath();
-      ctx.roundRect(x, y, barWidth, barHeight, 3);
+      if (typeof ctx.roundRect === 'function') { ctx.roundRect(x, y, barWidth, barHeight, 3); } else { ctx.rect(x, y, barWidth, barHeight); }
       ctx.fill();
     });
   }, [liveWaveform, selectedPeaks]);
