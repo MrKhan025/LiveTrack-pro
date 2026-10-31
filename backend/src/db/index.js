@@ -19,6 +19,7 @@ class DatabaseAdapter {
       audio_recordings: [],
       geofences: [],
       sos_alerts: [],
+      live_shares: [],
       security_logs: []
     };
 
@@ -494,7 +495,48 @@ class DatabaseAdapter {
       .sort((a, b) => new Date(b.triggeredAt) - new Date(a.triggeredAt));
   }
 
-  // --- SECURITY LOGS ---
+
+  // --- EPHEMERAL LIVE LOCATION SHARES ---
+  async createLiveShare({ ownerId, deviceId, label = 'Emergency Family Share', expiresInMinutes = 60 }) {
+    const share = {
+      id: crypto.randomUUID(),
+      ownerId,
+      deviceId,
+      shareToken: crypto.randomBytes(18).toString('hex'),
+      label: String(label).trim(),
+      revoked: false,
+      expiresAt: new Date(Date.now() + Number(expiresInMinutes) * 60000).toISOString(),
+      createdAt: new Date().toISOString()
+    };
+    this.state.live_shares.push(share);
+    this._saveToDisk();
+    return share;
+  }
+
+  async getLiveShareByToken(shareToken) {
+    const now = Date.now();
+    return (
+      this.state.live_shares.find(
+        (s) => s.shareToken === shareToken && !s.revoked && new Date(s.expiresAt).getTime() > now
+      ) || null
+    );
+  }
+
+  async listLiveSharesByOwner(ownerId) {
+    return this.state.live_shares
+      .filter((s) => s.ownerId === ownerId)
+      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  }
+
+  async revokeLiveShare(shareId, ownerId) {
+    const share = this.state.live_shares.find((s) => s.id === shareId && s.ownerId === ownerId);
+    if (!share) return null;
+    share.revoked = true;
+    this._saveToDisk();
+    return share;
+  }
+
+  // ---SECURITY LOGS---
   async appendSecurityLog({ userId = null, deviceId = null, eventType, severity = 'info', ipAddress = '127.0.0.1', userAgent = 'system', details = {} }) {
     const entry = {
       id: crypto.randomUUID(),
