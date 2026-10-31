@@ -1,4 +1,4 @@
-# LiveTrack-Pro (Codename: Veloce / Navox) — Build, Verification & Deployment Report
+# LiveTrack-Pro — Build, Verification & Deployment Report
 
 ## 1. Executive Summary & Repository Name Recommendations
 **LiveTrack-Pro** has been engineered as a single, unified, production-ready monorepo combining **LiveTrack GPS** (real-time location tracking, route history, geofencing, SOS beacon, and GPX/GeoJSON export) and **LiveTrack Audio** (strictly user-initiated, consent-based microphone recording, live WebSocket waveform streaming, and AES-256-GCM encrypted storage).
