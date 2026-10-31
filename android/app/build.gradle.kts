@@ -4,11 +4,11 @@ plugins {
 }
 
 android {
-    namespace = "pro.livetrack.veloce"
+    namespace = "pro.livetrack.app"
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "pro.livetrack.veloce"
+        applicationId = "pro.livetrack.app"
         minSdk = 26
         targetSdk = 34
         versionCode = 200
