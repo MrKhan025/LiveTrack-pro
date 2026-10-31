@@ -1,23 +1,24 @@
 {
   "name": "livetrack-pro-backend",
-  "version": "2.0.0",
-  "description": "Unified Real-Time GPS & Consent-Based Audio Platform Backend (PostgreSQL + Embedded Dual Engine)",
+  "version": "2.1.0",
+  "description": "LiveTrack-Pro Unified Real-Time GPS & Consent-Based Audio Platform Backend",
   "main": "src/server.js",
+  "license": "MIT",
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "migrate": "node src/db/migrate.js",
-    "test": "node --test tests/platform.test.js"
+    "test": "node src/runTests.js"
   },
   "engines": {
     "node": ">=18.0.0"
   },
   "dependencies": {
     "cors": "^2.8.5",
-    "express": "^4.19.2",
-    "express-rate-limit": "^7.4.0",
-    "helmet": "^7.1.0",
-    "pg": "^8.12.0",
+    "express": "^4.21.1",
+    "express-rate-limit": "^7.4.1",
+    "helmet": "^8.0.0",
+    "pg": "^8.13.1",
     "ws": "^8.18.0"
   }
 }
