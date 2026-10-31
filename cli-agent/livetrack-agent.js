@@ -2,7 +2,7 @@
 'use strict';
 
 /**
- * LiveTrack-Pro (Codename: Veloce / Navox) Universal Cross-Platform Agent
+ * LiveTrack-Pro Universal Cross-Platform Agent
  * Runs natively on:
  *  - Termux on Android (`termux-location`, `termux-battery-status`, `termux-microphone-record`, `termux-notification`)
  *  - Linux (`geoclue` / `/sys/class/power_supply` / `arecord`)
