@@ -1,0 +1,10 @@
+node_modules/
+dist/
+build/
+.gradle/
+local.properties
+*.env
+!.env.example
+backend/storage/audio/*.enc
+backend/storage/db.json
+.DS_Store

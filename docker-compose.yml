@@ -1,0 +1,61 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-livetrack}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ChangeMe_StrongDBPass!}
+      POSTGRES_DB: ${POSTGRES_DB:-livetrack_pro}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./migrations/001_initial_schema.sql:/docker-entrypoint-initdb.d/001_initial_schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-livetrack} -d ${POSTGRES_DB:-livetrack_pro}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PORT: 4000
+      NODE_ENV: production
+      DB_MODE: postgres
+      DATABASE_URL: postgresql://${POSTGRES_USER:-livetrack}:${POSTGRES_PASSWORD:-ChangeMe_StrongDBPass!}@postgres:5432/${POSTGRES_DB:-livetrack_pro}
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
+      AUDIO_ENCRYPTION_KEY: ${AUDIO_ENCRYPTION_KEY}
+    volumes:
+      - audio_storage:/app/backend/storage/audio
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: dashboard/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - backend
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      - backend
+      - dashboard
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+
+volumes:
+  pgdata:
+  audio_storage:

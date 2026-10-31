@@ -1,0 +1,12 @@
+{
+  "name": "livetrack-pro-monorepo",
+  "version": "2.0.0",
+  "private": true,
+  "description": "LiveTrack-Pro (Codename: Veloce / Navox) – Unified Cross-Platform GPS & Consent-Based Audio Platform",
+  "scripts": {
+    "start": "node backend/src/server.js",
+    "test": "node --test backend/tests/platform.test.js",
+    "migrate": "node backend/src/db/migrate.js",
+    "agent": "node cli-agent/livetrack-agent.js"
+  }
+}
