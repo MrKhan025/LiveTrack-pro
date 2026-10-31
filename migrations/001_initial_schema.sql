@@ -1,4 +1,4 @@
--- LiveTrack-Pro (Codename: Navox / Veloce) Unified PostgreSQL Schema
+-- LiveTrack-Pro Unified PostgreSQL Schema
 -- Migration: 001_initial_schema.sql
 
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 
 CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
 
--- 3. Registered Devices (Android, Termux, iOS PWA, Windows, Linux, macOS)
+-- 3. Registered Devices (Android, Termux, iOS, Windows, Linux, macOS, Web)
 CREATE TABLE IF NOT EXISTS devices (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -75,7 +75,6 @@ CREATE TABLE IF NOT EXISTS gps_locations (
 CREATE INDEX IF NOT EXISTS idx_gps_device_time ON gps_locations(device_id, recorded_at DESC);
 
 -- 5. Explicit Device-Initiated Audio Consent Sessions
--- Covert/remote microphone activation is strictly impossible by schema & cryptographic signature
 CREATE TABLE IF NOT EXISTS audio_sessions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     device_id UUID NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
@@ -86,14 +85,14 @@ CREATE TABLE IF NOT EXISTS audio_sessions (
     status VARCHAR(32) NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'stopped', 'expired')),
     sample_rate INTEGER NOT NULL DEFAULT 48000,
     channels INTEGER NOT NULL DEFAULT 1,
-    mime_type VARCHAR(64) NOT NULL DEFAULT 'audio/webm;codecs=opus',
+    mime_type VARCHAR(64) NOT NULL DEFAULT 'audio/wav',
     started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     ended_at TIMESTAMPTZ
 );
 
 CREATE INDEX IF NOT EXISTS idx_audio_sessions_owner ON audio_sessions(owner_id, started_at DESC);
 
--- 6. Authorized Audio Recordings (Encrypted at Rest)
+-- 6. Authorized Audio Recordings (AES-256-GCM Encrypted at Rest)
 CREATE TABLE IF NOT EXISTS audio_recordings (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     session_id UUID NOT NULL REFERENCES audio_sessions(id) ON DELETE CASCADE,
@@ -113,7 +112,7 @@ CREATE TABLE IF NOT EXISTS audio_recordings (
 
 CREATE INDEX IF NOT EXISTS idx_audio_recordings_owner ON audio_recordings(owner_id, created_at DESC);
 
--- 7. Smart Geofences (New Feature)
+-- 7. Smart Circular Geofences
 CREATE TABLE IF NOT EXISTS geofences (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -128,7 +127,7 @@ CREATE TABLE IF NOT EXISTS geofences (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- 8. Emergency SOS Alerts (New Feature)
+-- 8. Emergency SOS Alerts
 CREATE TABLE IF NOT EXISTS sos_alerts (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     device_id UUID NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
@@ -142,7 +141,19 @@ CREATE TABLE IF NOT EXISTS sos_alerts (
     resolved_at TIMESTAMPTZ
 );
 
--- 9. Immutable Security Audit Logs
+-- 9. Ephemeral Read-Only Live Location Share Links
+CREATE TABLE IF NOT EXISTS live_shares (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    device_id UUID NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+    share_token VARCHAR(64) UNIQUE NOT NULL,
+    label VARCHAR(120) NOT NULL,
+    revoked BOOLEAN NOT NULL DEFAULT FALSE,
+    expires_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- 10. Immutable Security Audit Logs
 CREATE TABLE IF NOT EXISTS security_logs (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID REFERENCES users(id) ON DELETE SET NULL,
