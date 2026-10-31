@@ -18,8 +18,10 @@ const {
   encryptBuffer,
   decryptBuffer,
   computeWaveformPeaks,
-  haversineMeters
+  haversineMeters,
+  generatePairingSvgMatrix
 } = require('./lib/cryptoAuth');
+const { getStandaloneConsoleHtml } = require('./lib/standaloneConsoleHtml');
 
 function isValidEmail(email) {
   return typeof email === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
@@ -138,12 +140,19 @@ function createPlatformServer(options = {}) {
     return device;
   }
 
+  // Built-in Single-Port Interactive Console for instant Termux / Mobile / PC usage
+  app.get('/', (req, res) => {
+    res.set('Content-Type', 'text/html; charset=utf-8');
+    res.set('Content-Security-Policy', "default-src 'self' https://unpkg.com https://*.tile.openstreetmap.org 'unsafe-inline';");
+    res.send(getStandaloneConsoleHtml());
+  });
+
   // Health & Platform Discovery
   app.get('/api/health', (req, res) => {
     res.json({
       status: 'ok',
       platform: 'LiveTrack-Pro Unified GPS & Consent Audio Platform',
-      codename: 'Veloce / Navox',
+      version: '2.1.0',
       dbMode: db.mode,
       supportedClients: ['android-kotlin', 'termux-cli', 'ios-pwa', 'windows', 'linux', 'macos', 'web-dashboard'],
       timestamp: new Date().toISOString()
@@ -394,6 +403,24 @@ function createPlatformServer(options = {}) {
     res.json({ device });
   });
 
+  // NEW FEATURE: SVG Visual Pairing Code & Deep-Link Generator for Mobile / Termux
+  app.get('/api/devices/:id/pairing-qr', requireAuth(), async (req, res) => {
+    const device = await verifyDeviceOwnershipOrReject(req, res, req.params.id);
+    if (!device) return;
+    const serverOrigin = `${req.headers['x-forwarded-proto'] || 'http'}://${req.headers.host || 'localhost:4000'}`;
+    const code = device.pairingCode || 'PAIRED';
+    const deepLink = `livetrack://pair?server=${encodeURIComponent(serverOrigin)}&code=${encodeURIComponent(code)}&deviceId=${device.id}`;
+    const svgQr = generatePairingSvgMatrix(deepLink, code);
+    res.json({
+      deviceId: device.id,
+      deviceName: device.deviceName,
+      pairingCode: device.pairingCode,
+      deepLink,
+      cliCommand: `node cli-agent/livetrack-agent.js --server ${serverOrigin} --pair ${code}`,
+      svgQr
+    });
+  });
+
   app.post('/api/devices/:id/tracking', requireAuth(['admin', 'owner']), async (req, res) => {
     const device = await verifyDeviceOwnershipOrReject(req, res, req.params.id);
     if (!device) return;
@@ -530,6 +557,34 @@ function createPlatformServer(options = {}) {
     if (!device) return;
     const format = (req.query.format || 'geojson').toLowerCase();
     const history = await db.getDeviceGpsHistory(device.id, 1000);
+
+    if (format === 'csv') {
+      const rows = ['id,deviceId,latitude,longitude,altitude,accuracy,speed,heading,batteryLevel,recordedAt'];
+      for (const pt of history) {
+        rows.push(`${pt.id},${pt.deviceId},${pt.latitude},${pt.longitude},${pt.altitude || 0},${pt.accuracy || 5},${pt.speed || 0},${pt.heading || 0},${pt.batteryLevel ?? 100},${pt.recordedAt}`);
+      }
+      res.set('Content-Type', 'text/csv; charset=utf-8');
+      return res.send(rows.join('\n'));
+    }
+
+    if (format === 'kml') {
+      const coords = history.map((pt) => `${pt.longitude},${pt.latitude},${pt.altitude || 0}`).join(' ');
+      const kml = `<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+  <Document>
+    <name>${device.deviceName} Route Track</name>
+    <Placemark>
+      <name>${device.deviceName}</name>
+      <LineString>
+        <tessellate>1</tessellate>
+        <coordinates>${coords}</coordinates>
+      </LineString>
+    </Placemark>
+  </Document>
+</kml>`;
+      res.set('Content-Type', 'application/vnd.google-earth.kml+xml; charset=utf-8');
+      return res.send(kml);
+    }
 
     if (format === 'gpx') {
       const trkpts = history
@@ -909,6 +964,125 @@ ${trkpts}
       devices,
       recentAudioSessions: sessions.slice(0, 5),
       recentSecurityLogs: securityLogs.slice(0, 10)
+    });
+  });
+
+  // --- NEW FEATURE: EPHEMERAL READ-ONLY LIVE SHARE LINKS ---
+  app.post('/api/shares', requireAuth(['admin', 'owner']), async (req, res) => {
+    const { deviceId, label = 'Live Family Safety Link', expiresInMinutes = 60 } = req.body || {};
+    if (!deviceId) return res.status(400).json({ error: 'MISSING_DEVICE_ID' });
+    const device = await verifyDeviceOwnershipOrReject(req, res, deviceId);
+    if (!device) return;
+
+    const mins = Math.min(10080, Math.max(5, Number(expiresInMinutes || 60)));
+    const share = await db.createLiveShare({
+      ownerId: req.user.id,
+      deviceId: device.id,
+      label,
+      expiresInMinutes: mins
+    });
+
+    await db.appendSecurityLog({
+      userId: req.user.id,
+      deviceId: device.id,
+      eventType: 'LIVE_SHARE_LINK_CREATED',
+      severity: 'info',
+      ipAddress: req.ip,
+      details: { shareId: share.id, expiresAt: share.expiresAt }
+    });
+
+    res.status(201).json({
+      share,
+      publicUrl: `/api/shares/public/${share.shareToken}`
+    });
+  });
+
+  app.get('/api/shares', requireAuth(), async (req, res) => {
+    const shares = await db.listLiveSharesByOwner(req.user.id);
+    res.json({ shares });
+  });
+
+  app.get('/api/shares/public/:token', async (req, res) => {
+    const share = await db.getLiveShareByToken(req.params.token);
+    if (!share) {
+      return res.status(404).json({ error: 'SHARE_LINK_EXPIRED_OR_INVALID' });
+    }
+    const device = await db.getDeviceById(share.deviceId);
+    const recentTrack = await db.getDeviceGpsHistory(share.deviceId, 20);
+    res.json({
+      share: {
+        label: share.label,
+        expiresAt: share.expiresAt
+      },
+      device: device
+        ? {
+            deviceName: device.deviceName,
+            platform: device.platform,
+            batteryLevel: device.batteryLevel,
+            lastLatitude: device.lastLatitude,
+            lastLongitude: device.lastLongitude,
+            lastSpeed: device.lastSpeed,
+            lastSeenAt: device.lastSeenAt
+          }
+        : null,
+      recentTrack
+    });
+  });
+
+  app.delete('/api/shares/:id', requireAuth(['admin', 'owner']), async (req, res) => {
+    const revoked = await db.revokeLiveShare(req.params.id, req.user.id);
+    if (!revoked) return res.status(404).json({ error: 'SHARE_NOT_FOUND' });
+    res.json({ status: 'revoked', share: revoked });
+  });
+
+  // --- NEW FEATURE: FLEET TELEMETRY & DISTANCE ANALYTICS ---
+  app.get('/api/analytics/fleet', requireAuth(), async (req, res) => {
+    const [devices, recordings] = await Promise.all([
+      db.listDevicesByOwner(req.user.id),
+      db.listAudioRecordingsByOwner(req.user.id)
+    ]);
+
+    const deviceMetrics = [];
+    let fleetTotalMeters = 0;
+
+    for (const dev of devices) {
+      const history = await db.getDeviceGpsHistory(dev.id, 500);
+      let distanceMeters = 0;
+      let maxSpeed = 0;
+      for (let i = 0; i < history.length; i++) {
+        if (history[i].speed > maxSpeed) maxSpeed = history[i].speed;
+        if (i > 0) {
+          distanceMeters += haversineMeters(
+            history[i - 1].latitude,
+            history[i - 1].longitude,
+            history[i].latitude,
+            history[i].longitude
+          );
+        }
+      }
+      fleetTotalMeters += distanceMeters;
+      deviceMetrics.push({
+        deviceId: dev.id,
+        deviceName: dev.deviceName,
+        platform: dev.platform,
+        totalPoints: history.length,
+        distanceKm: Number((distanceMeters / 1000).toFixed(3)),
+        maxSpeedMps: Number(maxSpeed.toFixed(2)),
+        batteryLevel: dev.batteryLevel,
+        lowBatteryWarning: (dev.batteryLevel ?? 100) < 20
+      });
+    }
+
+    const totalAudioDurationSeconds = recordings.reduce((acc, r) => acc + Number(r.durationSeconds || 0), 0);
+
+    res.json({
+      fleetSummary: {
+        totalDevices: devices.length,
+        fleetDistanceKm: Number((fleetTotalMeters / 1000).toFixed(3)),
+        totalAuthorizedAudioSeconds: Number(totalAudioDurationSeconds.toFixed(1)),
+        lowBatteryDevices: deviceMetrics.filter((m) => m.lowBatteryWarning).length
+      },
+      deviceMetrics
     });
   });
 
