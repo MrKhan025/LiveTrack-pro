@@ -2,45 +2,55 @@ name: LiveTrack-Pro Unified CI & Security Audit
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [ main, master, develop ]
   pull_request:
-    branches: [ main ]
+    branches: [ main, master ]
+  workflow_dispatch:
 
 jobs:
   backend-test-and-security-scan:
-    runs-on: ubuntu-latest
+    name: Backend Integration & Security Suite
+    runs-on: ubuntu-24.04
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js 20
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Validate SQL Migrations
-        run: node backend/src/db/migrate.js
-
-      - name: Run Backend Automated Integration & Anti-Covert Security Tests
-        run: npm test
-
-      - name: Dependency Vulnerability Scan
+      - name: Checkout Repository (Native Git)
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          cd backend && npm audit --audit-level=high || true
+          git init .
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --no-tags --prune --depth=1 origin "${GITHUB_SHA}"
+          git checkout --force FETCH_HEAD
+
+      - name: Verify Node.js Runtime & Validate SQL Migrations
+        run: |
+          node -v
+          npm -v
+          node backend/src/db/migrate.js
+
+      - name: Run Automated Integration & Anti-Covert Security Tests
+        run: node backend/src/runTests.js
+
+      - name: Security & Dependency Audit
+        run: |
+          cd backend
+          npm audit --audit-level=high || true
 
   dashboard-typecheck:
-    runs-on: ubuntu-latest
+    name: Dashboard TypeScript & Build Verification
+    runs-on: ubuntu-24.04
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js 20
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
+      - name: Checkout Repository (Native Git)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git init .
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --no-tags --prune --depth=1 origin "${GITHUB_SHA}"
+          git checkout --force FETCH_HEAD
 
       - name: Install & Build React TypeScript Dashboard
         run: |
           cd dashboard
-          npm install
+          npm install --no-audit --no-fund
+          npm run typecheck
           npm run build
