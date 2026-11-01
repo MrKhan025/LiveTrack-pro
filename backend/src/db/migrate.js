@@ -4,20 +4,33 @@ const fs = require('fs');
 const path = require('path');
 
 async function runMigrations() {
-  const sqlPath = path.join(__dirname, '../../../migrations/001_initial_schema.sql');
-  const sql = fs.readFileSync(sqlPath, 'utf8');
-  if (process.env.DB_MODE === 'postgres' && process.env.DATABASE_URL) {
-    const { Pool } = require('pg');
-    const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-    try {
-      await pool.query(sql);
-      console.log('[Migrate] PostgreSQL schema 001_initial_schema.sql applied successfully.');
-    } finally {
-      await pool.end();
+  const migrationsDir = path.join(__dirname, '../../../migrations');
+  const files = fs
+    .readdirSync(migrationsDir)
+    .filter((f) => f.endsWith('.sql'))
+    .sort();
+
+  let totalBytes = 0;
+  for (const file of files) {
+    const sqlPath = path.join(migrationsDir, file);
+    const sql = fs.readFileSync(sqlPath, 'utf8');
+    totalBytes += sql.length;
+
+    if (process.env.DB_MODE === 'postgres' && process.env.DATABASE_URL) {
+      const { Pool } = require('pg');
+      const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+      try {
+        await pool.query(sql);
+        console.log(`[Migrate] Applied PostgreSQL migration: ${file}`);
+      } finally {
+        await pool.end();
+      }
     }
-  } else {
-    console.log('[Migrate] Embedded database schema verified and ready (SQL file validated: ' + sql.length + ' bytes).');
   }
+
+  console.log(
+    `[Migrate] Verified ${files.length} SQL migration files (${files.join(', ')}; ${totalBytes} bytes total).`
+  );
 }
 
 if (require.main === module) {
