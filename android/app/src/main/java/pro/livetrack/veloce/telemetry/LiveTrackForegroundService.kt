@@ -18,6 +18,7 @@ class LiveTrackForegroundService : Service() {
     private lateinit var fusedLocationClient: FusedLocationProviderClient
     private lateinit var locationCallback: LocationCallback
     private var serverUrl: String = "https://10.0.2.2:4000"
+    private var currentIntervalMs: Long = 10000L
 
     companion object {
         private const val CHANNEL_ID = "livetrack_pro_foreground_channel"
@@ -47,6 +48,14 @@ class LiveTrackForegroundService : Service() {
         }
     }
 
+    private fun computeAdaptiveIntervalMs(batteryPct: Int, speedMps: Float): Long {
+        if (batteryPct < 15) return 90000L
+        if (batteryPct < 30) return if (speedMps > 3f) 25000L else 60000L
+        if (speedMps > 8f) return 5000L
+        if (speedMps > 1.5f) return 10000L
+        return 20000L
+    }
+
     @SuppressLint("MissingPermission")
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         serverUrl = intent?.getStringExtra("SERVER_URL") ?: serverUrl
@@ -59,13 +68,17 @@ class LiveTrackForegroundService : Service() {
             return START_NOT_STICKY
         }
 
+        val bm = getSystemService(Context.BATTERY_SERVICE) as BatteryManager
+        val battery = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+        currentIntervalMs = computeAdaptiveIntervalMs(battery, 0f)
+
         val notification = buildPersistentNotification(
-            "LiveTrack-Pro Active: Fused GPS Tracking Running (User-Initiated)"
+            "LiveTrack-Pro Active: Adaptive Fused GPS (${currentIntervalMs / 1000}s interval)"
         )
         startForeground(NOTIFICATION_ID, notification)
 
-        val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 5000L)
-            .setMinUpdateIntervalMillis(2500L)
+        val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, currentIntervalMs)
+            .setMinUpdateIntervalMillis(currentIntervalMs / 2)
             .build()
 
         fusedLocationClient.requestLocationUpdates(
@@ -102,13 +115,13 @@ class LiveTrackForegroundService : Service() {
                 .put("speed", spd)
                 .put("heading", hdg)
                 .put("batteryLevel", battery)
-                .put("provider", "google-fused")
+                .put("provider", "google-fused-adaptive")
                 .toString()
 
             conn.outputStream.use { it.write(payload.toByteArray()) }
             conn.inputStream.close()
         } catch (_: Exception) {
-            // Offline store-and-forward queue handles intermittent connectivity
+            // Offline store-and-forward queue buffers coordinates until network reconnects
         }
     }
 
