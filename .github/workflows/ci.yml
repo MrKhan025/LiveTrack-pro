@@ -29,31 +29,13 @@ jobs:
 
       - name: Run Automated Integration & Anti-Covert Security Tests
         run: |
+          export JWT_ACCESS_SECRET="$(node -e 'console.log(require("crypto").randomBytes(32).toString("hex"))')"
+          export JWT_REFRESH_SECRET="$(node -e 'console.log(require("crypto").randomBytes(32).toString("hex"))')"
+          export AUDIO_ENCRYPTION_KEY="$(node -e 'console.log(require("crypto").randomBytes(32).toString("hex"))')"
           if [ -f "backend/src/runTests.js" ]; then
             node backend/src/runTests.js
           elif [ -f "backend/tests/platform.test.js" ]; then
             node --test backend/tests/platform.test.js
-          else
-            node -e '
-              const assert = require("node:assert/strict");
-              const fs = require("fs");
-              const os = require("os");
-              const path = require("path");
-              const { createPlatformServer } = require("./backend/src/app");
-              const { DatabaseAdapter } = require("./backend/src/db");
-              (async () => {
-                const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "lt-ci-"));
-                const db = new DatabaseAdapter({ mode: "embedded", persist: false });
-                const { server } = createPlatformServer({ db, storageDir: tmp });
-                await new Promise((r) => server.listen(0, "127.0.0.1", r));
-                const port = server.address().port;
-                const res = await fetch(`http://127.0.0.1:${port}/api/health`);
-                assert.equal(res.status, 200);
-                console.log("[CI] Core Backend Health & Security Suite Verified OK on port", port);
-                if (typeof server.closeAllConnections === "function") server.closeAllConnections();
-                server.close();
-              })();
-            '
           fi
 
       - name: Security & Dependency Audit
@@ -88,7 +70,7 @@ jobs:
             const fs = require("fs");
             fs.writeFileSync("dashboard/package.json", JSON.stringify({
               name: "livetrack-pro-dashboard",
-              version: "2.1.0",
+              version: "3.0.0",
               private: true,
               type: "module",
               scripts: {
@@ -111,7 +93,6 @@ jobs:
                 vite: "5.4.0"
               }
             }, null, 2) + "\n");
-            console.log("[CI] Verified exact matching React 18.3.1 peer dependencies in dashboard/package.json");
           '
 
       - name: Install & Build React TypeScript Dashboard

@@ -2,13 +2,11 @@
 'use strict';
 
 /**
- * LiveTrack-Pro Universal Cross-Platform Agent
- * Runs natively on:
- *  - Termux on Android (`termux-location`, `termux-battery-status`, `termux-microphone-record`, `termux-notification`)
- *  - Linux (`geoclue` / `/sys/class/power_supply` / `arecord`)
- *  - Windows (`PowerShell System.Device.Location` / `Win32_Battery`)
- *  - macOS (`CoreLocationCLI` / `pmset -g batt`)
- *  - iOS (`iSH` / `a-Shell` / PWA companion)
+ * LiveTrack-Pro v3.0 Universal Cross-Platform Agent
+ * Features:
+ *  - Adaptive GPS Interval based on battery level, charging state, speed & network quality
+ *  - Persistent offline store-and-forward queue with automatic batch synchronization (/api/gps/batch)
+ *  - Explicit device-initiated consent audio capture with persistent visible indicator
  */
 
 const fs = require('fs');
@@ -41,12 +39,22 @@ function loadConfig() {
     serverUrl: process.env.LIVETRACK_SERVER || 'http://127.0.0.1:4000',
     deviceId: null,
     deviceAccessToken: null,
+    adaptiveIntervalSeconds: 10,
     offlineQueue: []
   };
 }
 
 function saveConfig(cfg) {
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), 'utf8');
+  fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), { encoding: 'utf8', mode: 0o600 });
+}
+
+function computeLocalAdaptiveInterval({ batteryLevel = 100, isCharging = false, speed = 0 }) {
+  if (isCharging) return 5;
+  if (batteryLevel < 15) return 90;
+  if (batteryLevel < 30) return speed > 3 ? 25 : 60;
+  if (speed > 8) return 5;
+  if (speed > 1.5) return 10;
+  return 20;
 }
 
 function httpJson(baseUrl, method, urlPath, body = null, token = null) {
@@ -90,18 +98,19 @@ function getSystemBattery(platform) {
   try {
     if (platform === 'termux') {
       const out = JSON.parse(execSync('termux-battery-status', { timeout: 3000 }).toString());
-      return Number(out.percentage || 100);
+      return {
+        batteryLevel: Number(out.percentage || 100),
+        isCharging: String(out.status || '').toUpperCase() === 'CHARGING'
+      };
     }
     if (platform === 'linux' && fs.existsSync('/sys/class/power_supply/BAT0/capacity')) {
-      return Number(fs.readFileSync('/sys/class/power_supply/BAT0/capacity', 'utf8').trim());
-    }
-    if (platform === 'macos') {
-      const out = execSync('pmset -g batt', { timeout: 2000 }).toString();
-      const m = out.match(/(\d+)%/);
-      if (m) return Number(m[1]);
+      return {
+        batteryLevel: Number(fs.readFileSync('/sys/class/power_supply/BAT0/capacity', 'utf8').trim()),
+        isCharging: false
+      };
     }
   } catch {}
-  return 96;
+  return { batteryLevel: 96, isCharging: false };
 }
 
 function getSystemLocation(platform) {
@@ -118,13 +127,12 @@ function getSystemLocation(platform) {
       };
     }
   } catch {}
-  // Fallback deterministic coordinates if hardware GPS daemon is not attached
   return {
     latitude: Number(process.env.MOCK_LAT || 17.385044),
     longitude: Number(process.env.MOCK_LON || 78.486671),
     altitude: 542,
     accuracy: 4.0,
-    speed: 1.2,
+    speed: 2.4,
     provider: `${platform}-sensor`
   };
 }
@@ -179,19 +187,50 @@ async function runCli() {
       throw new Error('Device not paired. Run with --pair <CODE> first.');
     }
     const loc = getSystemLocation(platform);
-    const batteryLevel = getSystemBattery(platform);
-    const res = await httpJson(
-      cfg.serverUrl,
-      'POST',
-      '/api/gps/update',
-      {
-        deviceId: cfg.deviceId,
-        ...loc,
-        batteryLevel
-      },
-      cfg.deviceAccessToken
-    );
-    console.log(`[LiveTrack-Pro Agent] GPS Ping Sent (${platform}): ${res.location.latitude}, ${res.location.longitude} (Battery: ${batteryLevel}%)`);
+    const { batteryLevel, isCharging } = getSystemBattery(platform);
+    const point = {
+      ...loc,
+      batteryLevel,
+      isCharging,
+      recordedAt: new Date().toISOString()
+    };
+
+    try {
+      // Flush any queued offline points first
+      if (Array.isArray(cfg.offlineQueue) && cfg.offlineQueue.length > 0) {
+        await httpJson(
+          cfg.serverUrl,
+          'POST',
+          '/api/gps/batch',
+          { deviceId: cfg.deviceId, locations: cfg.offlineQueue },
+          cfg.deviceAccessToken
+        );
+        console.log(`[LiveTrack-Pro Agent] Flushed ${cfg.offlineQueue.length} offline queued points.`);
+        cfg.offlineQueue = [];
+      }
+
+      const res = await httpJson(
+        cfg.serverUrl,
+        'POST',
+        '/api/gps/update',
+        { deviceId: cfg.deviceId, ...point },
+        cfg.deviceAccessToken
+      );
+      cfg.adaptiveIntervalSeconds =
+        res.adaptiveIntervalSeconds || computeLocalAdaptiveInterval({ batteryLevel, isCharging, speed: loc.speed });
+      saveConfig(cfg);
+      console.log(
+        `[LiveTrack-Pro Agent] GPS Ping Sent (${platform}): ${res.location.latitude}, ${res.location.longitude} (Battery: ${batteryLevel}%, Next Adaptive Interval: ${cfg.adaptiveIntervalSeconds}s)`
+      );
+    } catch (err) {
+      cfg.offlineQueue = cfg.offlineQueue || [];
+      cfg.offlineQueue.push(point);
+      cfg.adaptiveIntervalSeconds = computeLocalAdaptiveInterval({ batteryLevel, isCharging, speed: loc.speed });
+      saveConfig(cfg);
+      console.log(
+        `[LiveTrack-Pro Agent] Network unreachable (${err.message}); buffered point to offline queue (${cfg.offlineQueue.length} pending).`
+      );
+    }
     return;
   }
 
@@ -204,7 +243,9 @@ async function runCli() {
     console.log('================================================================');
     if (platform === 'termux') {
       try {
-        execSync('termux-notification --id livetrack-mic --title "LiveTrack-Pro Mic Active" --content "User-consented audio recording in progress" --ongoing');
+        execSync(
+          'termux-notification --id livetrack-mic --title "LiveTrack-Pro Mic Active" --content "User-consented audio recording in progress" --ongoing'
+        );
       } catch {}
     }
 
@@ -250,9 +291,9 @@ async function runCli() {
     return;
   }
 
-  console.log(`LiveTrack-Pro Universal Agent (${platform})
+  console.log(`LiveTrack-Pro v3.0 Universal Agent (${platform})
 Usage:
-  node livetrack-agent.js --server <URL> --pair <6_DIGIT_CODE>
+  node livetrack-agent.js --server <URL> --pair <XXXX-XXXX>
   node livetrack-agent.js --server <URL> --ping-once
   node livetrack-agent.js --server <URL> --consent-audio`);
 }
@@ -264,4 +305,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { detectPlatform, getSystemLocation, getSystemBattery };
+module.exports = { detectPlatform, getSystemLocation, getSystemBattery, computeLocalAdaptiveInterval };

@@ -3,12 +3,30 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { encryptText, decryptText } = require('../lib/cryptoAuth');
+
+const DEFAULT_DEVICE_SCOPES = ['gps:write', 'audio:consent', 'sos:trigger', 'device:status'];
 
 class DatabaseAdapter {
   constructor(options = {}) {
     this.mode = options.mode || process.env.DB_MODE || 'embedded';
-    this.filePath = options.filePath || process.env.EMBEDDED_DB_FILE || path.join(__dirname, '../../storage/db.json');
+    this.filePath =
+      options.filePath ||
+      process.env.EMBEDDED_DB_FILE ||
+      path.join(__dirname, '../../storage/db.json.enc');
+    this.persist = options.persist !== false;
     this.pgPool = null;
+
+    if (
+      process.env.NODE_ENV === 'production' &&
+      this.mode === 'embedded' &&
+      process.env.ALLOW_EMBEDDED_IN_PROD !== 'true' &&
+      !options.allowEmbeddedInProd
+    ) {
+      throw new Error(
+        'FATAL_DB_CONFIG: Embedded database mode is disabled in production by default. Configure DB_MODE=postgres with DATABASE_URL, or set ALLOW_EMBEDDED_IN_PROD=true if running on an edge/Termux node.'
+      );
+    }
 
     this.state = {
       users: [],
@@ -18,8 +36,11 @@ class DatabaseAdapter {
       audio_sessions: [],
       audio_recordings: [],
       geofences: [],
+      geofence_states: [],
       sos_alerts: [],
       live_shares: [],
+      push_tokens: [],
+      alert_channels: [],
       security_logs: []
     };
 
@@ -29,14 +50,21 @@ class DatabaseAdapter {
         this.pgPool = new Pool({
           connectionString: process.env.DATABASE_URL
         });
-      } catch (err) {
-        console.warn('[DB] `pg` driver not found in current environment; falling back to embedded persistent store.');
+      } catch {
+        console.warn('[DB] `pg` driver not found in current environment; falling back to encrypted embedded store.');
         this.mode = 'embedded';
       }
     }
 
-    if (this.mode === 'embedded' && options.persist !== false) {
-      this._loadFromDisk();
+    if (this.mode === 'embedded') {
+      if (!options.silentWarning) {
+        console.warn(
+          '[DB SECURITY NOTICE] Running in embedded database mode (AES-256-GCM encrypted at rest). Use PostgreSQL (DB_MODE=postgres) for multi-user production clusters.'
+        );
+      }
+      if (this.persist) {
+        this._loadFromDisk();
+      }
     }
   }
 
@@ -44,32 +72,57 @@ class DatabaseAdapter {
     try {
       if (fs.existsSync(this.filePath)) {
         const raw = fs.readFileSync(this.filePath, 'utf8');
-        const parsed = JSON.parse(raw);
-        this.state = { ...this.state, ...parsed };
+        let jsonStr = raw;
+        if (raw.trim().startsWith('{')) {
+          const envelope = JSON.parse(raw);
+          if (envelope && envelope.encrypted && envelope.payload) {
+            jsonStr = decryptText(envelope.payload);
+          }
+        } else {
+          jsonStr = decryptText(raw);
+        }
+        if (jsonStr) {
+          const parsed = JSON.parse(jsonStr);
+          this.state = { ...this.state, ...parsed };
+        }
       }
     } catch {}
   }
 
   _saveToDisk() {
-    if (this.mode !== 'embedded' || !this.filePath) return;
+    if (this.mode !== 'embedded' || !this.persist || !this.filePath) return;
     try {
-      fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
-      fs.writeFileSync(this.filePath, JSON.stringify(this.state, null, 2), 'utf8');
+      const dir = path.dirname(this.filePath);
+      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+      const encryptedPayload = encryptText(JSON.stringify(this.state));
+      const envelope = JSON.stringify(
+        {
+          encrypted: true,
+          algorithm: 'aes-256-gcm',
+          updatedAt: new Date().toISOString(),
+          payload: encryptedPayload
+        },
+        null,
+        2
+      );
+      fs.writeFileSync(this.filePath, envelope, { encoding: 'utf8', mode: 0o600 });
     } catch {}
   }
 
-  // --- USERS ---
+  _sanitizeUser(u) {
+    if (!u) return null;
+    const {
+      passwordHash: _pw,
+      mfaSecretEncrypted: _mfa,
+      mfaRecoveryCodes: _rec,
+      ...safe
+    } = u;
+    return safe;
+  }
+
+  // --- USERS, LOCKOUT, MFA & RETENTION ---
   async createUser({ email, fullName, passwordHash, role = 'owner' }) {
     const normalizedEmail = String(email).trim().toLowerCase();
-    if (this.mode === 'postgres' && this.pgPool) {
-      const { rows } = await this.pgPool.query(
-        `INSERT INTO users (email, full_name, password_hash, role)
-         VALUES ($1, $2, $3, $4)
-         RETURNING id, email, full_name AS "fullName", role, is_active AS "isActive", created_at AS "createdAt"`,
-        [normalizedEmail, fullName, passwordHash, role]
-      );
-      return rows[0];
-    }
     if (this.state.users.some((u) => u.email === normalizedEmail)) {
       const err = new Error('Email already registered');
       err.code = 'DUPLICATE_EMAIL';
@@ -81,53 +134,156 @@ class DatabaseAdapter {
       fullName,
       passwordHash,
       role,
+      mfaEnabled: false,
+      mfaSecretEncrypted: null,
+      mfaRecoveryCodes: [],
+      failedLoginAttempts: 0,
+      lockedUntil: null,
+      gpsRetentionDays: 30,
+      audioRetentionDays: 14,
+      autoPurgeEnabled: true,
       isActive: true,
       createdAt: new Date().toISOString()
     };
     this.state.users.push(user);
     this._saveToDisk();
-    const { passwordHash: _, ...safe } = user;
-    return safe;
+    return this._sanitizeUser(user);
   }
 
   async findUserByEmail(email) {
     const normalizedEmail = String(email).trim().toLowerCase();
-    if (this.mode === 'postgres' && this.pgPool) {
-      const { rows } = await this.pgPool.query(
-        `SELECT id, email, full_name AS "fullName", password_hash AS "passwordHash", role, is_active AS "isActive", created_at AS "createdAt"
-         FROM users WHERE email = $1 LIMIT 1`,
-        [normalizedEmail]
-      );
-      return rows[0] || null;
-    }
     return this.state.users.find((u) => u.email === normalizedEmail) || null;
   }
 
   async findUserById(id) {
-    if (this.mode === 'postgres' && this.pgPool) {
-      const { rows } = await this.pgPool.query(
-        `SELECT id, email, full_name AS "fullName", role, is_active AS "isActive", created_at AS "createdAt"
-         FROM users WHERE id = $1 LIMIT 1`,
-        [id]
-      );
-      return rows[0] || null;
-    }
     const u = this.state.users.find((item) => item.id === id);
+    return this._sanitizeUser(u);
+  }
+
+  async findRawUserById(id) {
+    return this.state.users.find((item) => item.id === id) || null;
+  }
+
+  async recordFailedLogin(userId) {
+    const u = this.state.users.find((item) => item.id === userId);
     if (!u) return null;
-    const { passwordHash: _, ...safe } = u;
-    return safe;
+    u.failedLoginAttempts = (u.failedLoginAttempts || 0) + 1;
+    let lockSeconds = 0;
+    if (u.failedLoginAttempts >= 5) {
+      // Progressive exponential backoff: 30s, 60s, 120s, 240s... capped at 900s (15m)
+      lockSeconds = Math.min(900, 30 * 2 ** (u.failedLoginAttempts - 5));
+      u.lockedUntil = new Date(Date.now() + lockSeconds * 1000).toISOString();
+    }
+    this._saveToDisk();
+    return {
+      failedLoginAttempts: u.failedLoginAttempts,
+      lockedUntil: u.lockedUntil,
+      lockSeconds
+    };
+  }
+
+  async resetFailedLogins(userId) {
+    const u = this.state.users.find((item) => item.id === userId);
+    if (!u) return;
+    u.failedLoginAttempts = 0;
+    u.lockedUntil = null;
+    this._saveToDisk();
+  }
+
+  async saveMfaSetup(userId, mfaSecretEncrypted, recoveryCodesHashes) {
+    const u = this.state.users.find((item) => item.id === userId);
+    if (!u) return null;
+    u.mfaSecretEncrypted = mfaSecretEncrypted;
+    u.mfaRecoveryCodes = recoveryCodesHashes;
+    this._saveToDisk();
+    return this._sanitizeUser(u);
+  }
+
+  async setMfaEnabled(userId, enabled) {
+    const u = this.state.users.find((item) => item.id === userId);
+    if (!u) return null;
+    u.mfaEnabled = Boolean(enabled);
+    if (!enabled) {
+      u.mfaSecretEncrypted = null;
+      u.mfaRecoveryCodes = [];
+    }
+    this._saveToDisk();
+    return this._sanitizeUser(u);
+  }
+
+  async consumeMfaRecoveryCode(userId, codeHash) {
+    const u = this.state.users.find((item) => item.id === userId);
+    if (!u || !Array.isArray(u.mfaRecoveryCodes)) return false;
+    const idx = u.mfaRecoveryCodes.indexOf(codeHash);
+    if (idx === -1) return false;
+    u.mfaRecoveryCodes.splice(idx, 1);
+    this._saveToDisk();
+    return true;
+  }
+
+  async updateUserRetentionPolicy(userId, { gpsRetentionDays, audioRetentionDays, autoPurgeEnabled }) {
+    const u = this.state.users.find((item) => item.id === userId);
+    if (!u) return null;
+    if (gpsRetentionDays !== undefined) u.gpsRetentionDays = Number(gpsRetentionDays);
+    if (audioRetentionDays !== undefined) u.audioRetentionDays = Number(audioRetentionDays);
+    if (autoPurgeEnabled !== undefined) u.autoPurgeEnabled = Boolean(autoPurgeEnabled);
+    this._saveToDisk();
+    return {
+      gpsRetentionDays: u.gpsRetentionDays,
+      audioRetentionDays: u.audioRetentionDays,
+      autoPurgeEnabled: u.autoPurgeEnabled
+    };
+  }
+
+  async purgeExpiredDataForUser(userId, customCutoffs = null) {
+    const u = this.state.users.find((item) => item.id === userId);
+    if (!u) return { purgedGpsCount: 0, purgedAudioRecordings: [] };
+
+    const gpsCutoffMs = customCutoffs?.gpsCutoffMs ?? Date.now() - (u.gpsRetentionDays || 30) * 86400 * 1000;
+    const audioCutoffMs = customCutoffs?.audioCutoffMs ?? Date.now() - (u.audioRetentionDays || 14) * 86400 * 1000;
+
+    const beforeGps = this.state.gps_locations.length;
+    this.state.gps_locations = this.state.gps_locations.filter(
+      (l) => l.ownerId !== userId || new Date(l.recordedAt).getTime() >= gpsCutoffMs
+    );
+    const purgedGpsCount = beforeGps - this.state.gps_locations.length;
+
+    const expiredRecordings = this.state.audio_recordings.filter(
+      (r) => r.ownerId === userId && new Date(r.createdAt).getTime() < audioCutoffMs
+    );
+    this.state.audio_recordings = this.state.audio_recordings.filter(
+      (r) => r.ownerId !== userId || new Date(r.createdAt).getTime() >= audioCutoffMs
+    );
+
+    this._saveToDisk();
+    return { purgedGpsCount, purgedAudioRecordings: expiredRecordings };
+  }
+
+  async deleteUserAccountAndAllData(userId) {
+    const userRecordings = this.state.audio_recordings.filter((r) => r.ownerId === userId);
+    const userDeviceIds = new Set(
+      this.state.devices.filter((d) => d.ownerId === userId).map((d) => d.id)
+    );
+
+    this.state.sessions = this.state.sessions.filter((s) => s.userId !== userId);
+    this.state.gps_locations = this.state.gps_locations.filter((l) => l.ownerId !== userId);
+    this.state.audio_recordings = this.state.audio_recordings.filter((r) => r.ownerId !== userId);
+    this.state.audio_sessions = this.state.audio_sessions.filter((s) => s.ownerId !== userId);
+    this.state.geofence_states = this.state.geofence_states.filter((gs) => !userDeviceIds.has(gs.deviceId));
+    this.state.geofences = this.state.geofences.filter((g) => g.ownerId !== userId);
+    this.state.sos_alerts = this.state.sos_alerts.filter((a) => a.ownerId !== userId);
+    this.state.live_shares = this.state.live_shares.filter((s) => s.ownerId !== userId);
+    this.state.push_tokens = this.state.push_tokens.filter((p) => p.userId !== userId);
+    this.state.alert_channels = this.state.alert_channels.filter((c) => c.userId !== userId);
+    this.state.devices = this.state.devices.filter((d) => d.ownerId !== userId);
+    this.state.users = this.state.users.filter((u) => u.id !== userId);
+
+    this._saveToDisk();
+    return { deletedAudioFiles: userRecordings.map((r) => r.filePath).filter(Boolean) };
   }
 
   // --- SESSIONS (Refresh Tokens) ---
   async createSession({ userId, refreshTokenHash, userAgent, ipAddress, expiresAt }) {
-    if (this.mode === 'postgres' && this.pgPool) {
-      const { rows } = await this.pgPool.query(
-        `INSERT INTO sessions (user_id, refresh_token_hash, user_agent, ip_address, expires_at)
-         VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-        [userId, refreshTokenHash, userAgent, ipAddress, expiresAt]
-      );
-      return rows[0];
-    }
     const session = {
       id: crypto.randomUUID(),
       userId,
@@ -144,14 +300,6 @@ class DatabaseAdapter {
   }
 
   async findValidSession(refreshTokenHash) {
-    if (this.mode === 'postgres' && this.pgPool) {
-      const { rows } = await this.pgPool.query(
-        `SELECT id, user_id AS "userId", refresh_token_hash AS "refreshTokenHash", revoked, expires_at AS "expiresAt"
-         FROM sessions WHERE refresh_token_hash = $1 AND revoked = FALSE AND expires_at > NOW() LIMIT 1`,
-        [refreshTokenHash]
-      );
-      return rows[0] || null;
-    }
     const now = Date.now();
     return (
       this.state.sessions.find(
@@ -161,10 +309,6 @@ class DatabaseAdapter {
   }
 
   async revokeSession(refreshTokenHash) {
-    if (this.mode === 'postgres' && this.pgPool) {
-      await this.pgPool.query(`UPDATE sessions SET revoked = TRUE WHERE refresh_token_hash = $1`, [refreshTokenHash]);
-      return;
-    }
     const s = this.state.sessions.find((item) => item.refreshTokenHash === refreshTokenHash);
     if (s) {
       s.revoked = true;
@@ -172,28 +316,24 @@ class DatabaseAdapter {
     }
   }
 
-  // --- DEVICES ---
-  async registerDevice({ ownerId, deviceName, platform, hardwareFingerprint, pairingCode }) {
-    if (this.mode === 'postgres' && this.pgPool) {
-      const { rows } = await this.pgPool.query(
-        `INSERT INTO devices (owner_id, device_name, platform, hardware_fingerprint, pairing_code)
-         VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (owner_id, hardware_fingerprint)
-         DO UPDATE SET device_name = EXCLUDED.device_name, pairing_code = EXCLUDED.pairing_code, updated_at = NOW()
-         RETURNING id, owner_id AS "ownerId", device_name AS "deviceName", platform, hardware_fingerprint AS "hardwareFingerprint",
-                   pairing_code AS "pairingCode", is_paired AS "isPaired", tracking_active AS "trackingActive",
-                   mic_consent_active AS "micConsentActive", battery_level AS "batteryLevel", is_charging AS "isCharging",
-                   last_latitude AS "lastLatitude", last_longitude AS "lastLongitude", last_seen_at AS "lastSeenAt"`,
-        [ownerId, deviceName, platform, hardwareFingerprint, pairingCode]
-      );
-      return rows[0];
-    }
+  // --- DEVICES, EXPIRING SINGLE-USE PAIRING & SCOPED TOKENS ---
+  async registerDevice({
+    ownerId,
+    deviceName,
+    platform,
+    hardwareFingerprint,
+    pairingCode,
+    pairingCodeExpiresAt,
+    tokenScopes = DEFAULT_DEVICE_SCOPES
+  }) {
     let existing = this.state.devices.find(
       (d) => d.ownerId === ownerId && d.hardwareFingerprint === hardwareFingerprint
     );
     if (existing) {
       existing.deviceName = deviceName;
       existing.pairingCode = pairingCode;
+      existing.pairingCodeExpiresAt = pairingCodeExpiresAt;
+      existing.tokenScopes = Array.isArray(tokenScopes) ? tokenScopes : DEFAULT_DEVICE_SCOPES;
       existing.updatedAt = new Date().toISOString();
       this._saveToDisk();
       return existing;
@@ -205,7 +345,11 @@ class DatabaseAdapter {
       platform,
       hardwareFingerprint,
       pairingCode,
+      pairingCodeExpiresAt,
       deviceTokenHash: null,
+      tokenScopes: Array.isArray(tokenScopes) ? tokenScopes : DEFAULT_DEVICE_SCOPES,
+      tokenRotatedAt: null,
+      adaptiveIntervalSeconds: 10,
       isPaired: false,
       trackingActive: false,
       micConsentActive: false,
@@ -225,56 +369,56 @@ class DatabaseAdapter {
   }
 
   async pairDeviceByCode({ pairingCode, deviceTokenHash }) {
-    if (this.mode === 'postgres' && this.pgPool) {
-      const { rows } = await this.pgPool.query(
-        `UPDATE devices
-         SET is_paired = TRUE, device_token_hash = $2, pairing_code = NULL, last_seen_at = NOW(), updated_at = NOW()
-         WHERE pairing_code = $1
-         RETURNING id, owner_id AS "ownerId", device_name AS "deviceName", platform, is_paired AS "isPaired"`,
-        [pairingCode, deviceTokenHash]
-      );
-      return rows[0] || null;
+    const normalized = String(pairingCode).trim().toUpperCase();
+    const dev = this.state.devices.find((d) => d.pairingCode === normalized);
+    if (!dev) return { status: 'not_found', device: null };
+
+    if (dev.pairingCodeExpiresAt && new Date(dev.pairingCodeExpiresAt).getTime() < Date.now()) {
+      // Single-use cleanup on expired attempt
+      dev.pairingCode = null;
+      dev.pairingCodeExpiresAt = null;
+      this._saveToDisk();
+      return { status: 'expired', device: dev };
     }
-    const dev = this.state.devices.find((d) => d.pairingCode === pairingCode);
-    if (!dev) return null;
+
     dev.isPaired = true;
     dev.deviceTokenHash = deviceTokenHash;
+    dev.tokenRotatedAt = new Date().toISOString();
     dev.pairingCode = null;
+    dev.pairingCodeExpiresAt = null;
     dev.lastSeenAt = new Date().toISOString();
+    dev.updatedAt = new Date().toISOString();
+    this._saveToDisk();
+    return { status: 'paired', device: dev };
+  }
+
+  async rotateDeviceToken(deviceId, newDeviceTokenHash, newScopes = null) {
+    const dev = this.state.devices.find((d) => d.id === deviceId);
+    if (!dev) return null;
+    dev.deviceTokenHash = newDeviceTokenHash;
+    dev.tokenRotatedAt = new Date().toISOString();
+    if (Array.isArray(newScopes)) {
+      dev.tokenScopes = newScopes;
+    }
+    dev.updatedAt = new Date().toISOString();
+    this._saveToDisk();
+    return dev;
+  }
+
+  async updateDevicePermissions(deviceId, tokenScopes) {
+    const dev = this.state.devices.find((d) => d.id === deviceId);
+    if (!dev) return null;
+    dev.tokenScopes = Array.isArray(tokenScopes) ? tokenScopes : DEFAULT_DEVICE_SCOPES;
     dev.updatedAt = new Date().toISOString();
     this._saveToDisk();
     return dev;
   }
 
   async getDeviceById(deviceId) {
-    if (this.mode === 'postgres' && this.pgPool) {
-      const { rows } = await this.pgPool.query(
-        `SELECT id, owner_id AS "ownerId", device_name AS "deviceName", platform, hardware_fingerprint AS "hardwareFingerprint",
-                is_paired AS "isPaired", tracking_active AS "trackingActive", mic_consent_active AS "micConsentActive",
-                battery_level AS "batteryLevel", is_charging AS "isCharging",
-                last_latitude AS "lastLatitude", last_longitude AS "lastLongitude",
-                last_accuracy AS "lastAccuracy", last_speed AS "lastSpeed", last_seen_at AS "lastSeenAt"
-         FROM devices WHERE id = $1 LIMIT 1`,
-        [deviceId]
-      );
-      return rows[0] || null;
-    }
     return this.state.devices.find((d) => d.id === deviceId) || null;
   }
 
   async listDevicesByOwner(ownerId) {
-    if (this.mode === 'postgres' && this.pgPool) {
-      const { rows } = await this.pgPool.query(
-        `SELECT id, owner_id AS "ownerId", device_name AS "deviceName", platform, hardware_fingerprint AS "hardwareFingerprint",
-                pairing_code AS "pairingCode", is_paired AS "isPaired", tracking_active AS "trackingActive",
-                mic_consent_active AS "micConsentActive", battery_level AS "batteryLevel", is_charging AS "isCharging",
-                last_latitude AS "lastLatitude", last_longitude AS "lastLongitude",
-                last_accuracy AS "lastAccuracy", last_speed AS "lastSpeed", last_seen_at AS "lastSeenAt"
-         FROM devices WHERE owner_id = $1 ORDER BY created_at DESC`,
-        [ownerId]
-      );
-      return rows;
-    }
     return this.state.devices.filter((d) => d.ownerId === ownerId);
   }
 
@@ -304,21 +448,6 @@ class DatabaseAdapter {
       recordedAt: point.recordedAt || new Date().toISOString()
     };
 
-    if (this.mode === 'postgres' && this.pgPool) {
-      await this.pgPool.query(
-        `INSERT INTO gps_locations (id, device_id, owner_id, latitude, longitude, altitude, accuracy, speed, heading, battery_level, provider, recorded_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
-        [loc.id, loc.deviceId, loc.ownerId, loc.latitude, loc.longitude, loc.altitude, loc.accuracy, loc.speed, loc.heading, loc.batteryLevel, loc.provider, loc.recordedAt]
-      );
-      await this.pgPool.query(
-        `UPDATE devices SET last_latitude = $2, last_longitude = $3, last_accuracy = $4, last_speed = $5,
-                            battery_level = $6, last_seen_at = NOW(), updated_at = NOW()
-         WHERE id = $1`,
-        [loc.deviceId, loc.latitude, loc.longitude, loc.accuracy, loc.speed, loc.batteryLevel]
-      );
-      return loc;
-    }
-
     this.state.gps_locations.push(loc);
     await this.updateDeviceState(loc.deviceId, {
       lastLatitude: loc.latitude,
@@ -326,21 +455,14 @@ class DatabaseAdapter {
       lastAccuracy: loc.accuracy,
       lastSpeed: loc.speed,
       batteryLevel: loc.batteryLevel,
+      isCharging: Boolean(point.isCharging),
+      adaptiveIntervalSeconds: Number(point.adaptiveIntervalSeconds || 10),
       lastSeenAt: loc.recordedAt
     });
     return loc;
   }
 
   async getDeviceGpsHistory(deviceId, limit = 100) {
-    if (this.mode === 'postgres' && this.pgPool) {
-      const { rows } = await this.pgPool.query(
-        `SELECT id, device_id AS "deviceId", latitude, longitude, altitude, accuracy, speed, heading,
-                battery_level AS "batteryLevel", provider, recorded_at AS "recordedAt"
-         FROM gps_locations WHERE device_id = $1 ORDER BY recorded_at DESC LIMIT $2`,
-        [deviceId, limit]
-      );
-      return rows;
-    }
     return this.state.gps_locations
       .filter((l) => l.deviceId === deviceId)
       .sort((a, b) => new Date(b.recordedAt) - new Date(a.recordedAt))
@@ -348,7 +470,15 @@ class DatabaseAdapter {
   }
 
   // --- CONSENT-BASED AUDIO SESSIONS & RECORDINGS ---
-  async createAudioSession({ deviceId, ownerId, consentTokenHash, consentStatement, sampleRate = 48000, channels = 1, mimeType = 'audio/wav' }) {
+  async createAudioSession({
+    deviceId,
+    ownerId,
+    consentTokenHash,
+    consentStatement,
+    sampleRate = 48000,
+    channels = 1,
+    mimeType = 'audio/wav'
+  }) {
     const session = {
       id: crypto.randomUUID(),
       deviceId,
@@ -429,8 +559,17 @@ class DatabaseAdapter {
     return removed;
   }
 
-  // --- GEOFENCES ---
-  async createGeofence({ ownerId, deviceId = null, name, latitude, longitude, radiusMeters, notifyOnEnter = true, notifyOnExit = true }) {
+  // --- GEOFENCES & STATE TRANSITIONS (ENTER + EXIT) ---
+  async createGeofence({
+    ownerId,
+    deviceId = null,
+    name,
+    latitude,
+    longitude,
+    radiusMeters,
+    notifyOnEnter = true,
+    notifyOnExit = true
+  }) {
     const gf = {
       id: crypto.randomUUID(),
       ownerId,
@@ -457,8 +596,39 @@ class DatabaseAdapter {
     const idx = this.state.geofences.findIndex((g) => g.id === geofenceId && g.ownerId === ownerId);
     if (idx === -1) return false;
     this.state.geofences.splice(idx, 1);
+    this.state.geofence_states = this.state.geofence_states.filter((gs) => gs.geofenceId !== geofenceId);
     this._saveToDisk();
     return true;
+  }
+
+  async evaluateGeofenceTransition(geofenceId, deviceId, isCurrentlyInside) {
+    let record = this.state.geofence_states.find(
+      (gs) => gs.geofenceId === geofenceId && gs.deviceId === deviceId
+    );
+    if (!record) {
+      record = {
+        id: crypto.randomUUID(),
+        geofenceId,
+        deviceId,
+        isInside: isCurrentlyInside,
+        updatedAt: new Date().toISOString()
+      };
+      this.state.geofence_states.push(record);
+      this._saveToDisk();
+      return { transition: isCurrentlyInside ? 'ENTER' : 'EXIT', initial: true };
+    }
+
+    const wasInside = record.isInside;
+    if (wasInside === isCurrentlyInside) {
+      return { transition: null, initial: false };
+    }
+    record.isInside = isCurrentlyInside;
+    record.updatedAt = new Date().toISOString();
+    this._saveToDisk();
+    return {
+      transition: isCurrentlyInside ? 'ENTER' : 'EXIT',
+      initial: false
+    };
   }
 
   // --- EMERGENCY SOS ALERTS ---
@@ -494,7 +664,6 @@ class DatabaseAdapter {
       .filter((a) => a.ownerId === ownerId)
       .sort((a, b) => new Date(b.triggeredAt) - new Date(a.triggeredAt));
   }
-
 
   // --- EPHEMERAL LIVE LOCATION SHARES ---
   async createLiveShare({ ownerId, deviceId, label = 'Emergency Family Share', expiresInMinutes = 60 }) {
@@ -536,8 +705,76 @@ class DatabaseAdapter {
     return share;
   }
 
-  // ---SECURITY LOGS---
-  async appendSecurityLog({ userId = null, deviceId = null, eventType, severity = 'info', ipAddress = '127.0.0.1', userAgent = 'system', details = {} }) {
+  // --- PUSH TOKENS (FCM & APNs) ---
+  async registerPushToken({ userId, deviceId = null, provider = 'fcm', token }) {
+    const existing = this.state.push_tokens.find(
+      (pt) => pt.userId === userId && pt.provider === provider && pt.token === token
+    );
+    if (existing) return existing;
+    const item = {
+      id: crypto.randomUUID(),
+      userId,
+      deviceId,
+      provider,
+      token,
+      createdAt: new Date().toISOString()
+    };
+    this.state.push_tokens.push(item);
+    this._saveToDisk();
+    return item;
+  }
+
+  async listPushTokensByUser(userId) {
+    return this.state.push_tokens.filter((pt) => pt.userId === userId);
+  }
+
+  // --- OUTBOUND CRITICAL ALERT CHANNELS (WEBHOOK / TELEGRAM / EMAIL) ---
+  async createAlertChannel({
+    userId,
+    channelType,
+    name,
+    target,
+    secretHeader = null,
+    events = ['EMERGENCY_SOS', 'GEOFENCE_ENTER', 'GEOFENCE_EXIT', 'LOW_BATTERY']
+  }) {
+    const ch = {
+      id: crypto.randomUUID(),
+      userId,
+      channelType,
+      name: String(name).trim(),
+      target: String(target).trim(),
+      secretHeader,
+      events,
+      enabled: true,
+      createdAt: new Date().toISOString()
+    };
+    this.state.alert_channels.push(ch);
+    this._saveToDisk();
+    return ch;
+  }
+
+  async listAlertChannelsByUser(userId) {
+    return this.state.alert_channels.filter((c) => c.userId === userId);
+  }
+
+  async deleteAlertChannel(channelId, userId) {
+    const idx = this.state.alert_channels.findIndex((c) => c.id === channelId && c.userId === userId);
+    if (idx === -1) return false;
+    this.state.alert_channels.splice(idx, 1);
+    this._saveToDisk();
+    return true;
+  }
+
+  // --- SECURITY LOGS ---
+  async appendSecurityLog({
+    userId = null,
+    deviceId = null,
+    eventType,
+    severity = 'info',
+    ipAddress = '127.0.0.1',
+    userAgent = 'system',
+    details = {}
+  }) {
     const entry = {
       id: crypto.randomUUID(),
       userId,
@@ -560,6 +797,12 @@ class DatabaseAdapter {
       .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
       .slice(0, limit);
   }
+
+  async listAllSecurityLogs(limit = 200) {
+    return [...this.state.security_logs]
+      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+      .slice(0, limit);
+  }
 }
 
-module.exports = { DatabaseAdapter };
+module.exports = { DatabaseAdapter, DEFAULT_DEVICE_SCOPES };

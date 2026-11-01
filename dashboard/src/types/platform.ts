@@ -5,6 +5,10 @@ export interface User {
   email: string;
   fullName: string;
   role: 'admin' | 'owner' | 'viewer' | 'auditor';
+  mfaEnabled?: boolean;
+  gpsRetentionDays?: number;
+  audioRetentionDays?: number;
+  autoPurgeEnabled?: boolean;
   createdAt: string;
 }
 
@@ -15,6 +19,10 @@ export interface Device {
   platform: PlatformType;
   hardwareFingerprint: string;
   pairingCode?: string | null;
+  pairingCodeExpiresAt?: string | null;
+  tokenScopes?: string[];
+  tokenRotatedAt?: string | null;
+  adaptiveIntervalSeconds?: number;
   isPaired: boolean;
   trackingActive: boolean;
   micConsentActive: boolean;
@@ -105,4 +113,35 @@ export interface SecurityLog {
   userAgent: string;
   details: Record<string, unknown>;
   createdAt: string;
+}
+
+export interface AlertChannel {
+  id: string;
+  userId: string;
+  channelType: 'webhook' | 'telegram' | 'email';
+  name: string;
+  target: string;
+  events: string[];
+  enabled: boolean;
+  createdAt: string;
+}
+
+export interface AdminSecuritySummary {
+  rateLimitStatistics: {
+    backend: string;
+    totalRequests: number;
+    totalAllowed: number;
+    totalBlocked: number;
+    activeBuckets: number;
+    blockedByIp: Record<string, number>;
+    perRouteHits: Record<string, number>;
+  };
+  severityBreakdown: {
+    critical: number;
+    high: number;
+    warn: number;
+    info: number;
+  };
+  recentCriticalEvents: SecurityLog[];
+  totalAuditLogsReturned: number;
 }

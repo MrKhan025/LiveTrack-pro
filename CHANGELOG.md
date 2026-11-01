@@ -1,17 +1,22 @@
 # Changelog
 
-All notable changes to **LiveTrack-Pro** are documented in this file.
+## [3.0.0] - 2026-10-31
+### Security Fixes (Part 1)
+- Removed all hard-coded fallback secrets from `backend/src/lib/cryptoAuth.js` and added fail-fast startup validation (`validateRequiredSecrets`).
+- Disabled wildcard CORS (`*`) and enforced strict `CORS_ORIGIN` allowlist validation + HTTPS enforcement in production.
+- Strengthened password policy to 12+ characters with uppercase, lowercase, digit, symbol, and breached-password checks + progressive exponential login lockout (`429 ACCOUNT_TEMPORARILY_LOCKED`).
+- Added `ProductionRateLimiter` (`backend/src/lib/rateLimiter.js`) with Redis (`REDIS_URL`) support and admin telemetry statistics.
+- Enforced mandatory CSRF validation (`X-CSRF-Token`) for browser state-changing requests.
+- Encrypted embedded database (`db.json.enc`) at rest with `AES-256-GCM` and blocked unapproved embedded mode in production.
+- Upgraded device pairing codes to 8-character single-use `XXXX-XXXX` codes with 10-minute expiration (`410 PAIRING_CODE_EXPIRED`).
+- Implemented complete Geofence Enter (`GEOFENCE_ENTER`) and Exit (`GEOFENCE_EXIT`) transition detection.
+- Implemented RFC-6238 TOTP Multi-Factor Authentication (`/api/auth/mfa/setup`, `/enable`, `/verify`, `/disable`).
+- Enforced `0600` file permissions on encrypted audio blobs and added GDPR account & data erasure (`DELETE /api/auth/account`).
 
-## [2.1.0] - 2026-10-31
-### Added
-- Built-in Single-Port Interactive Web & Mobile Console (GET / on port 4000) for zero-build usage on Termux, Android, iOS, Windows, and Linux.
-- Scannable SVG QR Pairing Matrix & Deep-Link Generator (GET /api/devices/:id/pairing-qr).
-- Google Earth (KML) and Spreadsheet (CSV) route exports alongside GPX and GeoJSON.
-- Ephemeral Read-Only Live Location Share Links (POST /api/shares, GET /api/shares/public/:token, DELETE /api/shares/:id).
-- Fleet Telemetry & Haversine Distance Analytics (GET /api/analytics/fleet).
-- GitHub PR template, Issue templates, Dependabot config, CODEOWNERS, CODE_OF_CONDUCT.md, SECURITY.md, CONTRIBUTING.md, and LICENSE.
-- Added dashboard/src/vite-env.d.ts and dashboard/public/sw.js PWA service worker.
-
-### Fixed
-- Resolved GitHub Actions Node.js 20 deprecation warnings and ubuntu-latest migration notices by pinning ubuntu-24.04 and native Git/Node steps.
-- Resolved Backend Integration & Security Suite exit code 1 by embedding backend/src/runTests.js and adding a CI self-healing fallback.
+### New Features (Part 2)
+- Device-scoped API tokens with on-demand rotation (`POST /api/devices/:id/rotate-token`) and fine-grained permission scopes (`PUT /api/devices/:id/permissions`).
+- Push Notifications (`FCM` for Android + `APNs` for iOS) and Outbound Alert Channels (`Webhook` with HMAC-SHA256, `Telegram`, `Email`).
+- Historical Route Replay scrubber + HTML5 Canvas Speed & Altitude telemetry charts + Multi-Device Marker Clustering on the React dashboard.
+- Configurable Data Retention Policies (`GET/PUT /api/settings/retention` & `POST /api/settings/retention/purge`).
+- Adaptive GPS reporting interval engine (`GET /api/devices/:id/adaptive-config`) based on battery, charging state, speed, and network quality.
+- Admin Security & Rate-Limit Statistics endpoint (`GET /api/admin/security-summary`) and dashboard view.
