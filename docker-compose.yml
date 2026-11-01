@@ -11,11 +11,17 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./migrations/001_initial_schema.sql:/docker-entrypoint-initdb.d/001_initial_schema.sql:ro
+      - ./migrations/002_security_and_features_v3.sql:/docker-entrypoint-initdb.d/002_security_and_features_v3.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-livetrack} -d ${POSTGRES_DB:-livetrack_pro}"]
       interval: 5s
       timeout: 5s
       retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
 
   backend:
     build:
@@ -25,11 +31,15 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_started
     environment:
       PORT: 4000
       NODE_ENV: production
       DB_MODE: postgres
       DATABASE_URL: postgresql://${POSTGRES_USER:-livetrack}:${POSTGRES_PASSWORD:-ChangeMe_StrongDBPass!}@postgres:5432/${POSTGRES_DB:-livetrack_pro}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      CORS_ORIGIN: ${CORS_ORIGIN:-https://localhost,http://localhost:3000}
       JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET}
       JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
       AUDIO_ENCRYPTION_KEY: ${AUDIO_ENCRYPTION_KEY}
